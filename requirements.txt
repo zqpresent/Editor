@@ -1,0 +1,6 @@
+# Text Editor - Lab1 Requirements
+# Python 3.8+
+
+# No external dependencies required for core functionality
+# All implementations use standard library only
+
