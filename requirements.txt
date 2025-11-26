@@ -4,3 +4,4 @@
 # No external dependencies required for core functionality
 # All implementations use standard library only
 
+pyspellchecker

@@ -116,5 +116,28 @@ class TextEditor(Editor):
     
     def check_log_enabled(self) -> bool:
         """Check if the first line is '# log' to enable logging."""
-        return len(self.content) > 0 and self.content[0].strip() == "# log"
+        return len(self.content) > 0 and self.content[0].strip().startswith("# log")
+    
+    def parse_log_config(self) -> tuple[bool, set[str]]:
+        """
+        Parse # log configuration from first line.
+        Returns: (is_enabled, excluded_commands)
+        """
+        if not self.content or not self.content[0].strip().startswith("# log"):
+            return (False, set())
+        
+        first_line = self.content[0].strip()
+        exclude_commands = set()
+        
+        # Parse "# log -e cmd1 -e cmd2"
+        parts = first_line.split()
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-e' and i + 1 < len(parts):
+                exclude_commands.add(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        
+        return (True, exclude_commands)
 

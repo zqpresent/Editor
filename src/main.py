@@ -93,6 +93,24 @@ class TextEditorCLI:
                 self.cmd_log_off(args)
             elif command == 'log-show':
                 self.cmd_log_show(args)
+            elif command == 'insert-before':
+                self.cmd_insert_before(args)
+            elif command == 'append-child':
+                self.cmd_append_child(args)
+            elif command == 'edit-id':
+                self.cmd_edit_id(args)
+            elif command == 'edit-text':
+                self.cmd_edit_text(args)
+            elif command == 'xml-tree':
+                self.cmd_xml_tree(args)
+            elif command == 'append-root':
+                self.cmd_append_root(args)
+            elif command == 'set-attr':
+                self.cmd_set_attr(args)
+            elif command == 'remove-attr':
+                self.cmd_remove_attr(args)
+            elif command == 'spell-check':
+                self.cmd_spell_check(args)
             elif command == 'exit':
                 self.cmd_exit()
             else:
@@ -112,28 +130,42 @@ class TextEditorCLI:
 可用命令:
 
 工作区命令:
-  load <file>              - 加载文件
-  save [file|all]          - 保存文件
-  init <file> [with-log]   - 创建新缓冲区
-  close [file]             - 关闭文件
-  edit <file>              - 切换活动文件
-  editor-list              - 显示文件列表
-  dir-tree [path]          - 显示目录树
-  undo                     - 撤销
-  redo                     - 重做
-  exit                     - 退出程序
+  load <file>                    - 加载文件
+  save [file|all]                - 保存文件
+  init <filepath> <text|xml> [with-log]  - 创建新缓冲区
+  close [file]                   - 关闭文件
+  edit <file>                    - 切换活动文件
+  editor-list                    - 显示文件列表(含时长)
+  dir-tree [path]                - 显示目录树
+  undo                           - 撤销
+  redo                           - 重做
+  exit                           - 退出程序
 
 文本编辑命令:
-  append "text"            - 追加文本
-  insert <line:col> "text" - 插入文本
-  delete <line:col> <len>  - 删除字符
+  append "text"                  - 追加文本
+  insert <line:col> "text"       - 插入文本
+  delete <line:col> <len>        - 删除字符
   replace <line:col> <len> "text" - 替换文本
-  show [start:end]         - 显示内容
+  show [start:end]               - 显示内容
+
+XML编辑命令:
+  append-root <tag> <newId> ["text"] [attr=val ...]        - 创建/替换根元素
+  insert-before <tag> <newId> <targetId> ["text"] [attr=val ...] - 插入元素
+  append-child <tag> <newId> <parentId> ["text"] [attr=val ...]  - 追加子元素
+  edit-id <oldId> <newId>                                  - 修改元素ID
+  edit-text <elementId> ["text"]                           - 修改元素文本
+  delete <elementId>                                       - 删除元素
+  set-attr <elementId> <attrName> <attrValue>              - 设置/修改属性
+  remove-attr <elementId> <attrName>                       - 删除属性
+  xml-tree [file]                                          - 显示XML树
 
 日志命令:
-  log-on [file]            - 启用日志
-  log-off [file]           - 关闭日志
-  log-show [file]          - 显示日志
+  log-on [file]                  - 启用日志
+  log-off [file]                 - 关闭日志
+  log-show [file]                - 显示日志
+
+拼写检查:
+  spell-check [file]             - 拼写检查
 """
         print(help_text)
     
@@ -159,19 +191,27 @@ class TextEditorCLI:
     
     def cmd_init(self, args: list) -> None:
         """Initialize a new file."""
-        if not args:
-            print("Error: 缺少文件路径")
-            print("用法: init <file> [with-log]")
+        if len(args) < 2:
+            print("Error: 参数不足")
+            print("用法: init <filepath> <text|xml> [with-log]")
             return
         
         filepath = args[0]
-        with_log = len(args) > 1 and args[1] == 'with-log'
+        file_type = args[1].lower()
         
-        result = self.workspace.init_file(filepath, with_log)
+        if file_type not in ['text', 'xml']:
+            print("Error: 文件类型必须是 text 或 xml")
+            return
+        
+        with_log = len(args) > 2 and args[2] == 'with-log'
+        
+        result = self.workspace.init_file(filepath, file_type, with_log)
         print(result)
         
         # Log the command
-        cmd_str = f"init {filepath} with-log" if with_log else f"init {filepath}"
+        cmd_str = f"init {filepath} {file_type}"
+        if with_log:
+            cmd_str += " with-log"
         self.workspace.log_command(cmd_str)
     
     def cmd_close(self, args: list) -> None:
@@ -247,6 +287,9 @@ class TextEditorCLI:
                     self.workspace.save_file(filepath)
                     print(f"Saved: {filepath}")
         
+        # Notify observers about exit
+        self.workspace.exit_workspace()
+        
         # Save workspace state
         self.workspace.save_state()
         print("工作区状态已保存。再见！")
@@ -297,33 +340,55 @@ class TextEditorCLI:
             print(f"Error: {str(e)}")
     
     def cmd_delete(self, args: list) -> None:
-        """Delete characters."""
-        if len(args) < 2:
-            print("Error: 参数不足")
-            print("用法: delete <line:col> <len>")
-            return
+        """Delete characters or XML element."""
+        from .editor.xml_editor import XMLEditor
         
-        pos = self.parser.parse_position(args[0])
-        if not pos:
-            print(f"Error: 无效的位置格式: {args[0]}")
-            return
-        
-        try:
-            length = int(args[1])
-        except ValueError:
-            print(f"Error: 无效的长度: {args[1]}")
-            return
-        
-        line, col = pos
-        
-        try:
-            self.workspace.execute_on_active('delete', line, col, length)
-            print("OK")
+        # Check if current editor is XML
+        if self.workspace.active_editor and isinstance(self.workspace.active_editor, XMLEditor):
+            # XML delete: delete <elementId>
+            if not args:
+                print("Error: 缺少元素ID")
+                print("用法: delete <elementId>")
+                return
             
-            # Log the command
-            self.workspace.log_command(f'delete {args[0]} {args[1]}')
-        except EditorException as e:
-            print(f"Error: {str(e)}")
+            element_id = args[0]
+            
+            try:
+                self.workspace.execute_on_active('delete_element', element_id)
+                print("OK")
+                
+                # Log the command
+                self.workspace.log_command(f'delete {element_id}')
+            except EditorException as e:
+                print(f"Error: {str(e)}")
+        else:
+            # Text delete: delete <line:col> <len>
+            if len(args) < 2:
+                print("Error: 参数不足")
+                print("用法: delete <line:col> <len>")
+                return
+            
+            pos = self.parser.parse_position(args[0])
+            if not pos:
+                print(f"Error: 无效的位置格式: {args[0]}")
+                return
+            
+            try:
+                length = int(args[1])
+            except ValueError:
+                print(f"Error: 无效的长度: {args[1]}")
+                return
+            
+            line, col = pos
+            
+            try:
+                self.workspace.execute_on_active('delete', line, col, length)
+                print("OK")
+                
+                # Log the command
+                self.workspace.log_command(f'delete {args[0]} {args[1]}')
+            except EditorException as e:
+                print(f"Error: {str(e)}")
     
     def cmd_replace(self, args: list) -> None:
         """Replace characters."""
@@ -403,6 +468,226 @@ class TextEditorCLI:
         """Show log content."""
         filepath = args[0] if args else None
         result = self.workspace.show_log(filepath)
+        print(result)
+    
+    # Command Handlers - XML Editing Commands
+    
+    def cmd_insert_before(self, args: list) -> None:
+        """Insert element before target element."""
+        if len(args) < 3:
+            print("Error: 参数不足")
+            print("用法: insert-before <tag> <newId> <targetId> [\"text\"] [attr=val ...]")
+            return
+        
+        tag = args[0]
+        new_id = args[1]
+        target_id = args[2]
+        
+        # Parse text (4th argument if it doesn't contain '=')
+        text = ""
+        attr_start = 3
+        if len(args) > 3 and '=' not in args[3]:
+            text = self.parser.unescape_string(args[3])
+            attr_start = 4
+        
+        # Parse attributes
+        attributes = self.parser.parse_attributes(args, attr_start)
+        
+        try:
+            self.workspace.execute_on_active('insert_before', tag, new_id, target_id, text, attributes)
+            print("OK")
+            
+            # Log the command
+            text_arg = f' "{args[3]}"' if len(args) > 3 and '=' not in args[3] else ' ""'
+            attr_args = ' '.join(args[attr_start:])
+            log_cmd = f'insert-before {tag} {new_id} {target_id}{text_arg}'
+            if attr_args:
+                log_cmd += f' {attr_args}'
+            self.workspace.log_command(log_cmd)
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_append_child(self, args: list) -> None:
+        """Append child element to parent."""
+        if len(args) < 3:
+            print("Error: 参数不足")
+            print("用法: append-child <tag> <newId> <parentId> [\"text\"] [attr=val ...]")
+            return
+        
+        tag = args[0]
+        new_id = args[1]
+        parent_id = args[2]
+        
+        # Parse text (4th argument if it doesn't contain '=')
+        text = ""
+        attr_start = 3
+        if len(args) > 3 and '=' not in args[3]:
+            text = self.parser.unescape_string(args[3])
+            attr_start = 4
+        
+        # Parse attributes
+        attributes = self.parser.parse_attributes(args, attr_start)
+        
+        try:
+            self.workspace.execute_on_active('append_child', tag, new_id, parent_id, text, attributes)
+            print("OK")
+            
+            # Log the command
+            text_arg = f' "{args[3]}"' if len(args) > 3 and '=' not in args[3] else ' ""'
+            attr_args = ' '.join(args[attr_start:])
+            log_cmd = f'append-child {tag} {new_id} {parent_id}{text_arg}'
+            if attr_args:
+                log_cmd += f' {attr_args}'
+            self.workspace.log_command(log_cmd)
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_edit_id(self, args: list) -> None:
+        """Edit element ID."""
+        if len(args) < 2:
+            print("Error: 参数不足")
+            print("用法: edit-id <oldId> <newId>")
+            return
+        
+        old_id = args[0]
+        new_id = args[1]
+        
+        try:
+            self.workspace.execute_on_active('edit_id', old_id, new_id)
+            print("OK")
+            
+            # Log the command
+            self.workspace.log_command(f'edit-id {old_id} {new_id}')
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_edit_text(self, args: list) -> None:
+        """Edit element text."""
+        if len(args) < 1:
+            print("Error: 参数不足")
+            print("用法: edit-text <elementId> [\"text\"]")
+            return
+        
+        element_id = args[0]
+        text = self.parser.unescape_string(args[1]) if len(args) > 1 else ""
+        
+        try:
+            self.workspace.execute_on_active('edit_text', element_id, text)
+            print("OK")
+            
+            # Log the command
+            text_arg = f' "{args[1]}"' if len(args) > 1 else ' ""'
+            self.workspace.log_command(f'edit-text {element_id}{text_arg}')
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_xml_tree(self, args: list) -> None:
+        """Display XML tree."""
+        from .editor.xml_editor import XMLEditor
+        
+        if args:
+            # Show specific file
+            filepath = args[0]
+            if filepath not in self.workspace.editors:
+                print(f"Error: 文件未打开: {filepath}")
+                return
+            editor = self.workspace.editors[filepath]
+        else:
+            # Show active file
+            if not self.workspace.active_editor:
+                print("Error: 没有活动文件")
+                return
+            editor = self.workspace.active_editor
+        
+        if not isinstance(editor, XMLEditor):
+            print("Error: 当前文件不是XML文件")
+            return
+        
+        try:
+            result = editor.show_tree()
+            print(result)
+        except Exception as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_append_root(self, args: list) -> None:
+        """Create or replace root element."""
+        if len(args) < 2:
+            print("Error: 参数不足")
+            print("用法: append-root <tag> <newId> [\"text\"] [attr=val ...]")
+            return
+        
+        tag = args[0]
+        new_id = args[1]
+        
+        # Parse text (3rd argument if it doesn't contain '=')
+        text = ""
+        attr_start = 2
+        if len(args) > 2 and '=' not in args[2]:
+            text = self.parser.unescape_string(args[2])
+            attr_start = 3
+        
+        # Parse attributes
+        attributes = self.parser.parse_attributes(args, attr_start)
+        
+        try:
+            self.workspace.execute_on_active('append_root', tag, new_id, text, attributes)
+            print("OK")
+            
+            # Log the command
+            text_arg = f' "{args[2]}"' if len(args) > 2 and '=' not in args[2] else ' ""'
+            attr_args = ' '.join(args[attr_start:])
+            log_cmd = f'append-root {tag} {new_id}{text_arg}'
+            if attr_args:
+                log_cmd += f' {attr_args}'
+            self.workspace.log_command(log_cmd)
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_set_attr(self, args: list) -> None:
+        """Set/modify element attribute."""
+        if len(args) < 3:
+            print("Error: 参数不足")
+            print("用法: set-attr <elementId> <attrName> <attrValue>")
+            return
+        
+        element_id = args[0]
+        attr_name = args[1]
+        attr_value = args[2]
+        
+        try:
+            self.workspace.execute_on_active('set_attribute', element_id, attr_name, attr_value)
+            print("OK")
+            
+            # Log the command
+            self.workspace.log_command(f'set-attr {element_id} {attr_name} {attr_value}')
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    def cmd_remove_attr(self, args: list) -> None:
+        """Remove element attribute."""
+        if len(args) < 2:
+            print("Error: 参数不足")
+            print("用法: remove-attr <elementId> <attrName>")
+            return
+        
+        element_id = args[0]
+        attr_name = args[1]
+        
+        try:
+            self.workspace.execute_on_active('remove_attribute', element_id, attr_name)
+            print("OK")
+            
+            # Log the command
+            self.workspace.log_command(f'remove-attr {element_id} {attr_name}')
+        except EditorException as e:
+            print(f"Error: {str(e)}")
+    
+    # Command Handlers - Spell Check Command
+    
+    def cmd_spell_check(self, args: list) -> None:
+        """Perform spell check."""
+        filepath = args[0] if args else None
+        result = self.workspace.spell_check(filepath)
         print(result)
 
 

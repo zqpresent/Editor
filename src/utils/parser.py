@@ -4,7 +4,7 @@ Parses user input and extracts command and arguments.
 """
 
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 
 class CommandParser:
@@ -109,4 +109,33 @@ class CommandParser:
         text = text.replace('\\\\', '\\')
         
         return text
+    
+    @staticmethod
+    def parse_attributes(args: List[str], start_index: int) -> Dict[str, str]:
+        """
+        Parse attributes from arguments starting at given index.
+        Format: key=value
+        
+        Args:
+            args: List of arguments
+            start_index: Index to start parsing from
+            
+        Returns:
+            Dictionary of attributes {key: value}
+        """
+        attributes = {}
+        
+        for i in range(start_index, len(args)):
+            arg = args[i]
+            if '=' in arg:
+                # Split on first '=' only
+                key, value = arg.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                
+                # Skip empty keys
+                if key:
+                    attributes[key] = value
+        
+        return attributes
 

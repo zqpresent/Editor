@@ -19,14 +19,25 @@ class Logger(Observer):
         self.enabled_files: Set[str] = set()
         self.log_files: Dict[str, str] = {}  # filepath -> log filepath
         self.session_started: Dict[str, bool] = {}  # Track if session start logged
+        self.exclude_commands: Dict[str, Set[str]] = {}  # filepath -> excluded commands
     
-    def enable_logging(self, filepath: str) -> None:
-        """Enable logging for a specific file."""
+    def enable_logging(self, filepath: str, exclude_cmds: Set[str] = None) -> None:
+        """
+        Enable logging for a specific file.
+        
+        Args:
+            filepath: Path to the file
+            exclude_cmds: Set of command names to exclude from logging
+        """
         if filepath not in self.enabled_files:
             self.enabled_files.add(filepath)
             log_path = self._get_log_path(filepath)
             self.log_files[filepath] = log_path
             self._write_session_start(filepath)
+        
+        # Set excluded commands
+        if exclude_cmds:
+            self.exclude_commands[filepath] = exclude_cmds
     
     def disable_logging(self, filepath: str) -> None:
         """Disable logging for a specific file."""
@@ -90,6 +101,12 @@ class Logger(Observer):
         
         if filepath not in self.enabled_files:
             return
+        
+        # Check if command should be filtered
+        if filepath in self.exclude_commands:
+            cmd_name = command_str.split()[0]
+            if cmd_name in self.exclude_commands[filepath]:
+                return  # Skip logging this command
         
         try:
             log_path = self.log_files.get(filepath)

@@ -8,8 +8,11 @@ import os
 from typing import Dict, Optional
 from .editor.editor import Editor
 from .editor.text_editor import TextEditor
+from .editor.xml_editor import XMLEditor
 from .logger.observer import Subject
 from .logger.logger import Logger
+from .statistics.observer import StatisticsObserver
+from .spell_checker import ISpellChecker, PySpellCheckerAdapter
 from .storage.memento import WorkspaceMemento
 from .utils.exceptions import (
     FileNotOpenedException,
@@ -24,6 +27,7 @@ class Workspace(Subject):
     """
     
     _instance = None
+    _spell_checker = None
     WORKSPACE_STATE_FILE = ".workspace.json"
     
     def __new__(cls):
@@ -36,9 +40,23 @@ class Workspace(Subject):
             super().__init__()
             self.editors: Dict[str, Editor] = {}
             self.active_editor: Optional[Editor] = None
+            
+            # Attach observers
             self.logger = Logger()
             self.attach(self.logger)
+            
+            self.statistics = StatisticsObserver()
+            self.attach(self.statistics)
+            
+            # Spell checker (dependency injection via class variable)
+            self.spell_checker = Workspace._spell_checker or PySpellCheckerAdapter()
+            
             self.initialized = True
+    
+    @classmethod
+    def set_spell_checker(cls, spell_checker: ISpellChecker) -> None:
+        """Set spell checker before creating workspace instance."""
+        cls._spell_checker = spell_checker
     
     # File Management
     
@@ -56,10 +74,15 @@ class Workspace(Subject):
         # Check if already open
         if filepath in self.editors:
             self.active_editor = self.editors[filepath]
+            # Notify statistics about file activation
+            self.notify('file_activated', {'filepath': filepath})
             return f"文件已打开，切换到: {filepath}"
         
-        # Create appropriate editor (currently only TextEditor)
-        editor = TextEditor(filepath)
+        # Create appropriate editor based on file extension
+        if filepath.endswith('.xml'):
+            editor = XMLEditor(filepath)
+        else:
+            editor = TextEditor(filepath)
         
         try:
             editor.load_from_file(filepath)
@@ -67,13 +90,14 @@ class Workspace(Subject):
             self.active_editor = editor
             
             # Check for auto-enable logging (# log)
-            if isinstance(editor, TextEditor) and editor.check_log_enabled():
-                self.logger.enable_logging(filepath)
+            log_enabled, exclude_cmds = editor.parse_log_config()
+            if log_enabled:
+                self.logger.enable_logging(filepath, exclude_cmds)
                 self.notify('file_loaded', {
                     'filepath': filepath,
                     'auto_enable': True
                 })
-                return f"Loaded: {filepath} (日志已自动启用)"
+                msg = f"Loaded: {filepath} (日志已自动启用)"
             else:
                 self.notify('file_loaded', {
                     'filepath': filepath,
@@ -81,9 +105,14 @@ class Workspace(Subject):
                 })
                 
                 if os.path.exists(filepath):
-                    return f"Loaded: {filepath}"
+                    msg = f"Loaded: {filepath}"
                 else:
-                    return f"文件不存在，已创建新缓冲区: {filepath}"
+                    msg = f"文件不存在，已创建新缓冲区: {filepath}"
+            
+            # Notify statistics about file activation
+            self.notify('file_activated', {'filepath': filepath})
+            
+            return msg
         except Exception as e:
             return f"Error: 无法加载文件: {str(e)}"
     
@@ -185,12 +214,17 @@ class Workspace(Subject):
         # Remove from editors
         del self.editors[filepath]
         
+        # Notify statistics about file closure
+        self.notify('file_closed', {'filepath': filepath})
+        
         # Update active editor
         if self.active_editor == editor:
             if self.editors:
                 # Switch to another file
                 self.active_editor = list(self.editors.values())[-1]
                 new_active = self.active_editor.filepath
+                # Notify statistics about new active file
+                self.notify('file_activated', {'filepath': new_active})
                 msg = f"Closed: {filepath}\n已切换到: {new_active}"
             else:
                 self.active_editor = None
@@ -205,12 +239,13 @@ class Workspace(Subject):
         
         return (msg, False)
     
-    def init_file(self, filepath: str, with_log: bool = False) -> str:
+    def init_file(self, filepath: str, file_type: str, with_log: bool = False) -> str:
         """
         Initialize a new file buffer.
         
         Args:
             filepath: File path
+            file_type: 'text' or 'xml'
             with_log: Whether to add '# log' as first line
             
         Returns: Status message
@@ -220,16 +255,30 @@ class Workspace(Subject):
         if filepath in self.editors:
             return f"Error: 文件已打开: {filepath}"
         
-        # Create new editor
-        editor = TextEditor(filepath)
-        
-        if with_log:
-            editor.content = ["# log"]
+        # Create appropriate editor
+        if file_type == 'xml':
+            from .editor.xml_editor import XMLElement
+            editor = XMLEditor(filepath)
+            # Initialize empty XML structure
+            editor.root = XMLElement('root', 'root', '')
+            editor.id_map = {'root': editor.root}
+            editor.has_log_line = with_log
+            if with_log:
+                editor.log_exclude_commands = set()
+                self.logger.enable_logging(filepath, set())
             editor.mark_modified()
-            self.logger.enable_logging(filepath)
+        else:
+            editor = TextEditor(filepath)
+            if with_log:
+                editor.content = ["# log"]
+                editor.mark_modified()
+                self.logger.enable_logging(filepath, set())
         
         self.editors[filepath] = editor
         self.active_editor = editor
+        
+        # Notify statistics about file activation
+        self.notify('file_activated', {'filepath': filepath})
         
         log_msg = " (日志已启用)" if with_log else ""
         return f"已创建新缓冲区: {filepath}{log_msg}"
@@ -242,10 +291,14 @@ class Workspace(Subject):
             return f"Error: 文件未打开: {filepath}"
         
         self.active_editor = self.editors[filepath]
+        
+        # Notify statistics about file activation
+        self.notify('file_activated', {'filepath': filepath})
+        
         return f"已切换到: {filepath}"
     
     def get_editor_list(self) -> str:
-        """Get formatted list of open files."""
+        """Get formatted list of open files with editing time."""
         if not self.editors:
             return "没有打开的文件"
         
@@ -257,7 +310,10 @@ class Workspace(Subject):
             prefix = "> " if is_active else "  "
             suffix = "*" if is_modified else ""
             
-            lines.append(f"{prefix}{filepath}{suffix}")
+            # Get editing time
+            time_str = self.statistics.format_time(filepath)
+            
+            lines.append(f"{prefix}{filepath}{suffix} ({time_str})")
         
         return '\n'.join(lines)
     
@@ -398,4 +454,83 @@ class Workspace(Subject):
                 'filepath': self.active_editor.filepath,
                 'command': command_str
             })
+    
+    def exit_workspace(self) -> None:
+        """Notify observers before exit."""
+        self.notify('workspace_exit', {})
+    
+    def spell_check(self, filepath: Optional[str] = None) -> str:
+        """
+        Perform spell check on a file.
+        
+        Args:
+            filepath: File to check (None = active file)
+            
+        Returns: Formatted spell check results
+        """
+        if filepath:
+            filepath = os.path.normpath(filepath)
+            if filepath not in self.editors:
+                return f"Error: 文件未打开: {filepath}"
+            editor = self.editors[filepath]
+        else:
+            if not self.active_editor:
+                return "Error: 没有活动文件"
+            editor = self.active_editor
+            filepath = editor.filepath
+        
+        results = []
+        
+        # Check based on editor type
+        if isinstance(editor, TextEditor):
+            # Check text file with line and column info
+            for line_num, line in enumerate(editor.content, 1):
+                errors = self._check_text_with_positions(line)
+                for word, col, suggestions in errors:
+                    suggestions_str = ', '.join(suggestions[:3])
+                    results.append(f'第{line_num}行，第{col}列: "{word}" -> 建议: {suggestions_str}')
+        
+        elif isinstance(editor, XMLEditor):
+            # Check XML text nodes
+            text_content = editor.get_all_text_content()
+            for elem_id, text in text_content:
+                errors = self._check_text_with_positions(text)
+                for word, col, suggestions in errors:
+                    suggestions_str = ', '.join(suggestions[:3])
+                    results.append(f'元素 {elem_id}: "{word}" -> 建议: {suggestions_str}')
+        
+        if results:
+            return "拼写检查结果:\n" + '\n'.join(results)
+        else:
+            return "拼写检查结果: 未发现错误"
+    
+    def _check_text_with_positions(self, text: str) -> list:
+        """
+        Check text and return errors with positions.
+        
+        Returns:
+            List of (word, column, suggestions)
+        """
+        import re
+        
+        results = []
+        checked = set()
+        
+        # Find all words with positions
+        for match in re.finditer(r'\b[A-Za-z]+\b', text):
+            word = match.group()
+            word_lower = word.lower()
+            
+            # Skip if already checked
+            if word_lower in checked:
+                continue
+            checked.add(word_lower)
+            
+            # Check word
+            error = self.spell_checker.check_word(word)
+            if error:
+                col = match.start() + 1  # 1-based column
+                results.append((error.word, col, error.suggestions))
+        
+        return results
 
