@@ -156,10 +156,6 @@ class TextEditorCLI:
         target = args[0] if args else None
         result = self.workspace.save_file(target)
         print(result)
-        
-        # Log the command
-        cmd_str = f"save {target}" if target else "save"
-        self.workspace.log_command(cmd_str)
     
     def cmd_init(self, args: list) -> None:
         """Initialize a new file."""
